@@ -575,14 +575,20 @@ impl Repository {
     /// Uncached — tree resolution is cheap (~1 ms) and stale-prone if memoized
     /// against a moving ref name.
     pub(super) fn rev_parse_tree(&self, spec: &str) -> anyhow::Result<String> {
-        Ok(self.run_command(&["rev-parse", spec])?.trim().to_string())
+        Ok(self
+            .run_command(&["rev-parse", "--verify", "--end-of-options", spec])?
+            .trim()
+            .to_string())
     }
 
     /// Resolve a ref to its commit SHA. Uncached — callers that want
     /// SHA-stable lookups for an entire command should capture a
     /// [`RefSnapshot`] up front and resolve through it.
     pub(super) fn rev_parse_commit(&self, r: &str) -> anyhow::Result<String> {
-        Ok(self.run_command(&["rev-parse", r])?.trim().to_string())
+        Ok(self
+            .run_command(&["rev-parse", "--verify", "--end-of-options", r])?
+            .trim()
+            .to_string())
     }
 
     /// Resolve a ref to its commit SHA, skipping git when the input already
@@ -717,13 +723,43 @@ fn snapshot_resolve(
     if let Some(sha) = snapshot.resolve(name) {
         return Ok(sha.to_string());
     }
-    Ok(repo.run_command(&["rev-parse", name])?.trim().to_string())
+    Ok(repo
+        .run_command(&["rev-parse", "--verify", "--end-of-options", name])?
+        .trim()
+        .to_string())
 }
 
 /// Returns true when `s` is a 40-character hex string — the canonical form
 /// of a git commit SHA-1.
 fn is_hex_commit_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod snapshot_resolve_tests {
+    use super::*;
+    use crate::testing::TestRepo;
+
+    /// Exercises the `git rev-parse` fallback when the snapshot doesn't
+    /// carry the ref (e.g. `HEAD`, tags, raw SHAs). The protective
+    /// `--verify --end-of-options` is on this call site too — keep this
+    /// test honest about what shape rev-parse returns.
+    #[test]
+    fn falls_back_to_rev_parse_for_refs_not_in_snapshot() {
+        let test = TestRepo::with_initial_commit();
+        let repo = Repository::at(test.root_path()).unwrap();
+        let snapshot = repo.capture_refs().unwrap();
+
+        // `HEAD` isn't captured into the snapshot; the fallback resolves it
+        // through git, producing the same SHA HEAD points at.
+        let head_sha_via_fallback = snapshot_resolve(&repo, &snapshot, "HEAD").unwrap();
+        let head_sha_direct = repo.run_command(&["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head_sha_via_fallback, head_sha_direct.trim());
+
+        // Bogus ref → error (not a confusing "unknown option" — `--verify`
+        // surfaces a clean "Needed a single revision" / "bad revision").
+        assert!(snapshot_resolve(&repo, &snapshot, "no-such-ref").is_err());
+    }
 }
 
 #[cfg(test)]
